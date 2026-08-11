@@ -1,227 +1,622 @@
 import requests
 import pandas as pd
 import re
-import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# ======================================
-# 1. FETCH WITH RETRIES & TIMEOUT
-# ======================================
-url = "https://en.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)"
-print(f"🌐 Fetching: {url}")
 
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+# ======================================
+# 1. CONFIGURATION
+# ======================================
+
+URL = "https://en.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
 }
 
-# Session with retry logic
+
+# ======================================
+# 2. FETCH PAGE
+# ======================================
+
+print(f"🌐 Fetching: {URL}")
+
 session = requests.Session()
-retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+
+retry = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+
 adapter = HTTPAdapter(max_retries=retry)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
+
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
 
 try:
-    response = session.get(url, headers=headers, timeout=30)
+    response = session.get(
+        URL,
+        headers=HEADERS,
+        timeout=30
+    )
+
     response.raise_for_status()
+
     print("✅ Page fetched successfully!")
+
 except requests.exceptions.Timeout:
-    print("❌ Connection timed out. Please check your internet or try using a VPN.")
-    exit()
+    print("❌ Connection timed out.")
+    raise SystemExit
+
 except requests.exceptions.RequestException as e:
     print(f"❌ Error fetching page: {e}")
-    exit()
+    raise SystemExit
+
 
 # ======================================
-# 2. PARSE AND FIND THE CORRECT TABLE
+# 3. PARSE HTML
 # ======================================
-soup = BeautifulSoup(response.content, 'html.parser')
 
-tables = soup.find_all('table', class_='wikitable')
+soup = BeautifulSoup(
+    response.content,
+    "html.parser"
+)
+
+tables = soup.find_all(
+    "table",
+    class_="wikitable"
+)
+
 print(f"📋 Found {len(tables)} wikitable(s).")
+
+
+# ======================================
+# 4. FIND GDP TABLE
+# ======================================
 
 target_table = None
 
-for idx, tbl in enumerate(tables):
-    header_row = tbl.find('tr')
+for index, table in enumerate(tables):
+
+    header_row = table.find("tr")
+
     if not header_row:
         continue
-    
-    headers_text = [th.get_text(strip=True) for th in header_row.find_all('th')]
-    print(f"   Table {idx+1} headers: {headers_text[:5]}...")
-    
-    # Check for GDP ranking table: has 'Rank' or (country + gdp/billion)
-    has_rank = any('rank' in h.lower() for h in headers_text)
-    has_country = any('country' in h.lower() or 'territory' in h.lower() for h in headers_text)
-    has_gdp = any('gdp' in h.lower() or 'billion' in h.lower() or 'us$' in h.lower() for h in headers_text)
-    
-    if has_rank or (has_country and has_gdp):
-        # Verify first column has numeric values (rank)
-        data_rows = tbl.find_all('tr')[1:6]
-        numeric_counts = 0
-        for tr in data_rows:
-            first_td = tr.find('td')
-            if first_td:
-                text = first_td.get_text(strip=True)
-                text = re.sub(r'\[\d+\]', '', text)
-                if text.replace(',', '').replace('.', '').isdigit():
-                    numeric_counts += 1
-        if numeric_counts >= 3:
-            target_table = tbl
-            print(f"✅ Found GDP ranking table (Table {idx+1})")
-            break
 
-# Fallback: if not found, try using the second table (commonly the GDP table)
-if not target_table and len(tables) >= 2:
-    target_table = tables[1]
-    print("⚠️  Using fallback: Table 2 (likely the GDP ranking table)")
-elif not target_table:
-    raise ValueError("❌ Could not find the GDP ranking table.")
+    headers = [
+        th.get_text(" ", strip=True)
+        for th in header_row.find_all("th")
+    ]
 
-table = target_table
+    print(
+        f"   Table {index + 1} headers: "
+        f"{headers[:5]}"
+    )
+
+    headers_lower = [
+        header.lower()
+        for header in headers
+    ]
+
+    # We are looking specifically for:
+    # Country/Territory
+    # AND
+    # IMF / World Bank / GDP
+
+    has_country = any(
+        "country" in header
+        or "territory" in header
+        for header in headers_lower
+    )
+
+    has_gdp_source = any(
+        "imf" in header
+        or "world bank" in header
+        or "gdp" in header
+        for header in headers_lower
+    )
+
+    if has_country and has_gdp_source:
+
+        target_table = table
+
+        print(
+            f"✅ GDP table found: Table {index + 1}"
+        )
+
+        break
+
+
+if target_table is None:
+
+    raise ValueError(
+        "❌ Could not find the GDP table."
+    )
+
 
 # ======================================
-# 3. EXTRACT HEADERS
+# 5. EXTRACT TABLE HEADERS
 # ======================================
-header_row = table.find('tr')
+
+header_row = target_table.find("tr")
+
 headers = []
-for th in header_row.find_all('th'):
-    text = th.get_text(strip=True)
-    text = re.sub(r'\[\d+\]', '', text)
-    headers.append(text.strip())
+
+for th in header_row.find_all("th"):
+
+    text = th.get_text(
+        " ",
+        strip=True
+    )
+
+    # Remove Wikipedia citations [1], [2], etc.
+    text = re.sub(
+        r"\[\d+\]",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    headers.append(
+        text.strip()
+    )
+
 
 print(f"\n📊 Final Headers: {headers}")
 
+
 # ======================================
-# 4. EXTRACT DATA ROWS
+# 6. EXTRACT ROWS
 # ======================================
+
 data_rows = []
-for tr in table.find_all('tr')[1:]:
-    cells = tr.find_all(['td', 'th'])
+
+for tr in target_table.find_all("tr")[1:]:
+
+    cells = tr.find_all(
+        ["td", "th"]
+    )
+
     if not cells:
         continue
-    
+
     row = []
+
     for cell in cells:
-        text = cell.get_text(strip=True)
-        text = re.sub(r'\[\d+\]', '', text)
-        row.append(text.strip())
-    
-    if row and len(row) >= 3:
-        first_val = row[0].replace(',', '').replace('.', '').strip()
-        if first_val.isdigit() or first_val == '—':
-            data_rows.append(row)
 
-print(f"📋 Extracted {len(data_rows)} rows of data.")
+        text = cell.get_text(
+            " ",
+            strip=True
+        )
+
+        # Remove citations
+        text = re.sub(
+            r"\[\d+\]",
+            "",
+            text
+        )
+
+        # Remove excessive spaces
+        text = re.sub(
+            r"\s+",
+            " ",
+            text
+        )
+
+        row.append(
+            text.strip()
+        )
+
+    # Only keep rows with enough columns
+    if len(row) >= len(headers):
+
+        row = row[:len(headers)]
+
+        data_rows.append(row)
+
+
+print(
+    f"📋 Extracted {len(data_rows)} rows of data."
+)
+
 
 # ======================================
-# 5. CREATE DATAFRAME
+# 7. CREATE DATAFRAME
 # ======================================
-df = pd.DataFrame(data_rows, columns=headers)
-print(f"📊 DataFrame created with {df.shape[0]} rows and {df.shape[1]} columns.")
+
+df = pd.DataFrame(
+    data_rows,
+    columns=headers
+)
+
+print(
+    f"📊 DataFrame created with "
+    f"{df.shape[0]} rows and "
+    f"{df.shape[1]} columns."
+)
+
 
 # ======================================
-# 6. CLEAN DATA
+# 8. IDENTIFY COUNTRY COLUMN
 # ======================================
-print("\n🔄 Cleaning data...")
 
-# Identify key columns
-rank_col = headers[0]
 country_col = None
+
+for column in df.columns:
+
+    column_lower = column.lower()
+
+    if (
+        "country" in column_lower
+        or "territory" in column_lower
+    ):
+
+        country_col = column
+        break
+
+
+if country_col is None:
+
+    raise ValueError(
+        "❌ Country/Territory column not found."
+    )
+
+
+# ======================================
+# 9. IDENTIFY GDP COLUMN
+# ======================================
+
+# We will use IMF GDP because it is the
+# first GDP estimate on the Wikipedia table.
+
 gdp_col = None
-year_col = None
 
-for col in df.columns:
-    col_lower = col.lower()
-    if 'country' in col_lower or 'territory' in col_lower or 'economy' in col_lower:
-        country_col = col
-    elif 'gdp' in col_lower or 'billion' in col_lower or 'us$' in col_lower:
-        gdp_col = col
-    elif 'year' in col_lower or 'date' in col_lower:
-        year_col = col
+for column in df.columns:
 
-if not country_col:
-    country_col = headers[1] if len(headers) > 1 else 'Country'
-if not gdp_col:
-    gdp_col = headers[2] if len(headers) > 2 else 'GDP'
+    column_lower = column.lower()
 
-print(f"   Using: Rank='{rank_col}', Country='{country_col}', GDP='{gdp_col}'")
+    if "imf" in column_lower:
 
-# Rename to standard names
-df = df.rename(columns={
-    rank_col: 'Rank',
-    country_col: 'Country',
-    gdp_col: 'GDP_Nominal'
-})
-if year_col:
-    df = df.rename(columns={year_col: 'Year'})
+        gdp_col = column
+        break
 
-# Clean GDP
+
+# Fallback to World Bank
+if gdp_col is None:
+
+    for column in df.columns:
+
+        column_lower = column.lower()
+
+        if "world bank" in column_lower:
+
+            gdp_col = column
+            break
+
+
+if gdp_col is None:
+
+    raise ValueError(
+        "❌ Could not find a GDP column."
+    )
+
+
+print(
+    f"   Country column: {country_col}"
+)
+
+print(
+    f"   GDP column: {gdp_col}"
+)
+
+
+# ======================================
+# 10. RENAME COLUMNS
+# ======================================
+
+df = df.rename(
+    columns={
+        country_col: "Country",
+        gdp_col: "GDP_Nominal"
+    }
+)
+
+
+# ======================================
+# 11. CLEAN COUNTRY NAMES
+# ======================================
+
+df["Country"] = (
+    df["Country"]
+    .astype(str)
+    .str.strip()
+)
+
+
+# ======================================
+# 12. CLEAN GDP
+# ======================================
+
 def clean_gdp(value):
-    if isinstance(value, str):
-        cleaned = re.sub(r'[^0-9.]', '', value)
-        try:
-            return float(cleaned)
-        except:
-            return None
-    return value
 
-df['GDP_Nominal'] = df['GDP_Nominal'].apply(clean_gdp)
+    if pd.isna(value):
+        return None
+
+    value = str(value)
+
+    # Remove Wikipedia references
+    value = re.sub(
+        r"\[\d+\]",
+        "",
+        value
+    )
+
+    # Extract first number
+    match = re.search(
+        r"[\d,]+(?:\.\d+)?",
+        value
+    )
+
+    if not match:
+        return None
+
+    number = match.group(0)
+
+    number = number.replace(
+        ",",
+        ""
+    )
+
+    try:
+
+        return float(number)
+
+    except ValueError:
+
+        return None
+
+
+df["GDP_Nominal"] = (
+    df["GDP_Nominal"]
+    .apply(clean_gdp)
+)
+
+
+# ======================================
+# 13. REMOVE INVALID GDP ROWS
+# ======================================
+
 before = len(df)
-df = df.dropna(subset=['GDP_Nominal'])
-print(f"   Dropped {before - len(df)} rows with invalid GDP.")
 
-# Clean Rank
-df['Rank'] = df['Rank'].apply(lambda x: 999 if x == '—' else x)
-df['Rank'] = pd.to_numeric(df['Rank'], errors='coerce').fillna(999).astype(int)
-df = df.sort_values('Rank').reset_index(drop=True)
+df = df.dropna(
+    subset=["GDP_Nominal"]
+)
 
-# Add GDP_Billions
-df['GDP_Billions'] = df['GDP_Nominal'].round(2)
+removed = before - len(df)
 
-# Add Year if missing
-if 'Year' not in df.columns:
-    df['Year'] = '2025'  # default
+print(
+    f"   Dropped {removed} rows "
+    f"with invalid GDP."
+)
+
 
 # ======================================
-# 7. SUMMARY
+# 14. ADD RANK
 # ======================================
+
+df = df.reset_index(
+    drop=True
+)
+
+df["Rank"] = (
+    df["GDP_Nominal"]
+    .rank(
+        ascending=False,
+        method="min"
+    )
+    .astype(int)
+)
+
+
+# ======================================
+# 15. SORT BY GDP
+# ======================================
+
+df = df.sort_values(
+    "GDP_Nominal",
+    ascending=False
+).reset_index(
+    drop=True
+)
+
+
+# Recalculate rank after sorting
+df["Rank"] = range(
+    1,
+    len(df) + 1
+)
+
+
+# ======================================
+# 16. ROUND GDP
+# ======================================
+
+df["GDP_Billions"] = (
+    df["GDP_Nominal"]
+    .round(2)
+)
+
+
+# ======================================
+# 17. ADD YEAR
+# ======================================
+
+df["Year"] = "2026"
+
+
+# ======================================
+# 18. REORDER COLUMNS
+# ======================================
+
+df = df[
+    [
+        "Rank",
+        "Country",
+        "GDP_Nominal",
+        "GDP_Billions",
+        "Year"
+    ]
+]
+
+
+# ======================================
+# 19. SUMMARY
+# ======================================
+
 summary = pd.DataFrame({
-    'Metric': ['Total Countries', 'Average GDP (Billions)', 'Median GDP (Billions)',
-               'Min GDP (Billions)', 'Max GDP (Billions)', 'Total GDP (Billions)'],
-    'Value': [
+
+    "Metric": [
+        "Total Countries",
+        "Average GDP (Billions)",
+        "Median GDP (Billions)",
+        "Minimum GDP (Billions)",
+        "Maximum GDP (Billions)",
+        "Total GDP (Billions)"
+    ],
+
+    "Value": [
+
         len(df),
-        round(df['GDP_Nominal'].mean(), 2),
-        round(df['GDP_Nominal'].median(), 2),
-        round(df['GDP_Nominal'].min(), 2),
-        round(df['GDP_Nominal'].max(), 2),
-        round(df['GDP_Nominal'].sum(), 2)
+
+        round(
+            df["GDP_Billions"].mean(),
+            2
+        ),
+
+        round(
+            df["GDP_Billions"].median(),
+            2
+        ),
+
+        round(
+            df["GDP_Billions"].min(),
+            2
+        ),
+
+        round(
+            df["GDP_Billions"].max(),
+            2
+        ),
+
+        round(
+            df["GDP_Billions"].sum(),
+            2
+        )
     ]
 })
 
+
 # ======================================
-# 8. EXPORT
+# 20. SAVE CSV
 # ======================================
+
 csv_file = "gdp_data.csv"
-df.to_csv(csv_file, index=False)
-print(f"✅ CSV saved: {csv_file}")
+
+df.to_csv(
+    csv_file,
+    index=False
+)
+
+print(
+    f"✅ CSV saved: {csv_file}"
+)
+
+
+# ======================================
+# 21. SAVE EXCEL
+# ======================================
 
 excel_file = "gdp_report.xlsx"
-with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
-    df.to_excel(writer, sheet_name='GDP_Data', index=False)
-    summary.to_excel(writer, sheet_name='Summary', index=False)
-print(f"✅ Excel saved: {excel_file}")
+
+with pd.ExcelWriter(
+    excel_file,
+    engine="openpyxl"
+) as writer:
+
+    df.to_excel(
+        writer,
+        sheet_name="GDP_Data",
+        index=False
+    )
+
+    summary.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False
+    )
+
+
+print(
+    f"✅ Excel saved: {excel_file}"
+)
+
 
 # ======================================
-# 9. PREVIEW
+# 22. PREVIEW
 # ======================================
-print("\n📊 Data Preview:")
-print(df.head(10).to_string())
 
-print("\n📊 Summary Statistics:")
-print(summary.to_string(index=False))
+print("\n📊 TOP 10 COUNTRIES:")
 
-print(f"\n✅ Scraping complete! {len(df)} countries extracted.")
-print("   Files created: gdp_data.csv, gdp_report.xlsx")
+print(
+    df.head(10).to_string(
+        index=False
+    )
+)
+
+
+print("\n📊 SUMMARY:")
+
+print(
+    summary.to_string(
+        index=False
+    )
+)
+
+
+# ======================================
+# 23. FINISHED
+# ======================================
+
+print(
+    f"\n✅ Scraping complete!"
+)
+
+print(
+    f"   {len(df)} countries extracted."
+)
+
+print(
+    "   Files created:"
+)
+
+print(
+    "   📄 gdp_data.csv"
+)
+
+print(
+    "   📊 gdp_report.xlsx"
+)
